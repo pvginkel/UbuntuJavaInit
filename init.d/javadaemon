@@ -1,0 +1,257 @@
+#!/bin/sh
+#
+# /etc/init.d/javadaemon -- startup script for a Java application
+#
+# Created from the Ubuntu Tomcat 7 init script by
+# Miquel van Smoorenburg <miquels@cistron.nl>, Ian Murdock <imurdock@gnu.ai.mit.edu>,
+# Stefan Gybas <sgybas@debian.org>, Thierry Carrez <thierry.carrez@ubuntu.com>,
+# Ernesto Hernandez-Novich <emhn@itverx.com.ve> and Jason Brittain <jason.brittain@mulesoft.com>.
+#
+# Changes to make this a generic Java init script by
+# Pieter van Ginkel <pvginkel@gmail.com>.
+#
+### BEGIN INIT INFO
+# Provides:          javadaemon
+# Required-Start:    $local_fs $remote_fs $network
+# Required-Stop:     $local_fs $remote_fs $network
+# Should-Start:      $named
+# Should-Stop:       $named
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start Java Daemon
+# Description:       Start the Java Daemon.
+### END INIT INFO
+
+set -e
+
+PATH=/bin:/usr/bin:/sbin:/usr/sbin
+NAME=javadaemon
+DESC="Java Daemon"
+DEFAULT=/etc/default/$NAME
+JVM_TMP=/tmp/$NAME-tmp
+
+if [ `id -u` -ne 0 ]; then
+	echo "You need root privileges to run this script"
+	exit 1
+fi
+ 
+# Make sure the Java application is started with system locale
+if [ -r /etc/default/locale ]; then
+	. /etc/default/locale
+	export LANG
+fi
+
+. /lib/lsb/init-functions
+
+if [ -r /etc/default/rcS ]; then
+	. /etc/default/rcS
+fi
+
+# The following variables can be overwritten in $DEFAULT.
+
+# Run the Java application as this user ID and group ID.
+RUN_USER=root
+RUN_GROUP=root
+
+# This is a work-around until there is a suitable runtime replacement 
+# for dpkg-architecture for arch:all packages.
+# This function sets the variable OPENJDKS.
+find_openjdks()
+{
+	for jvmdir in /usr/lib/jvm/java-8-openjdk-*
+	do
+		if [ -d "${jvmdir}" -a "${jvmdir}" != "/usr/lib/jvm/java-8-openjdk-common" ]
+		then
+			OPENJDKS=$jvmdir
+		fi
+	done
+	for jvmdir in /usr/lib/jvm/java-7-openjdk-*
+	do
+		if [ -d "${jvmdir}" -a "${jvmdir}" != "/usr/lib/jvm/java-7-openjdk-common" ]
+		then
+			OPENJDKS="${OPENJDKS} ${jvmdir}"
+		fi
+	done
+	for jvmdir in /usr/lib/jvm/java-6-openjdk-*
+	do
+		if [ -d "${jvmdir}" -a "${jvmdir}" != "/usr/lib/jvm/java-6-openjdk-common" ]
+		then
+			OPENJDKS="${OPENJDKS} ${jvmdir}"
+		fi
+	done
+}
+
+OPENJDKS=""
+find_openjdks
+# The first existing directory is used for JAVA_HOME (if JAVA_HOME is not
+# defined in $DEFAULT). JDK's are checked in the order as they appear in this
+# list.
+JDK_DIRS="/usr/lib/jvm/default-java ${OPENJDKS} /usr/lib/jvm/java-6-openjdk /usr/lib/jvm/java-6-sun /usr/lib/jvm/java-7-oracle /usr/lib/jvm/java-8-oracle"
+
+# Look for the right JVM to use
+for jdir in $JDK_DIRS; do
+    if [ -r "$jdir/bin/java" -a -z "${JAVA_HOME}" ]; then
+	JAVA_HOME="$jdir"
+    fi
+done
+export JAVA_HOME
+
+# The directory where the application is installed.
+RUN_BASE=/var/local/$NAME
+
+# Default Java options.
+if [ -z "$JAVA_OPTS" ]; then
+	JAVA_OPTS="-Xmx256M"
+fi
+
+# End of variables that can be overwritten in $DEFAULT
+
+# Overwrite settings from default file.
+if [ -f "$DEFAULT" ]; then
+	. "$DEFAULT"
+fi
+
+# Validate the installation directory.
+if [ ! -d "$RUN_BASE" ]; then
+	log_failure_msg "$NAME is not installed"
+	exit 1
+fi
+
+# Define other required variables.
+
+RUN_PID="/var/run/$NAME.pid"
+# Seconds to wait for the process to start up.
+STARTUP_TIMEOUT=5
+# Seconds to wait for the TERM to shutdown the daemon.
+TERM_TIMEOUT=20
+# Seconds to wait for the KILL to shutdown the daemon when TERM failed.
+KILL_TIMEOUT=5
+
+run_daemon() {
+	# Build the arguments. This is build from JAVA_CLASSPATH (if
+	# set), JAVA_OPTS, JAVA_RUN and sets the Java temporary directory.
+
+	EXEC="$JAVA_OPTS -Djava.io.tmpdir=\"$JVM_TMP\""
+
+	# Add extra Java options that cannot be overridden. The class path
+	# is put in a separate variable to prevent glob expansion.
+	CLASSPATH='bin/*'
+	EXEC="$EXEC -Dfile.encoding=UTF-8"
+
+	# Add the entry point of the application.
+	EXEC="$EXEC org.example.App"
+
+	# Run the Java application as a daemon. The arguments expect
+	# the Java application NOT to fork and uses the PID of the
+	# Java application as the RUN_PID.
+	set +e
+	touch "$RUN_PID"
+	chown $RUN_USER "$RUN_PID"
+	start-stop-daemon --start -b -u "$RUN_USER" -g "$RUN_GROUP" \
+		-c "$RUN_USER" -d "$RUN_BASE" -p "$RUN_PID" -m \
+		-x "$JAVA_HOME/bin/java" -- -classpath "$CLASSPATH" $EXEC
+	status="$?"
+	set +a -e
+	return $status
+}
+
+case "$1" in
+  start)
+	if [ -z "$JAVA_HOME" ]; then
+		log_failure_msg "no JDK or JRE found - please set JAVA_HOME"
+		exit 1
+	fi
+
+	log_daemon_msg "Starting $DESC" "$NAME"
+	if start-stop-daemon --test --start --pidfile "$RUN_PID" \
+		--user $RUN_USER --exec "$JAVA_HOME/bin/java" \
+		>/dev/null; then
+
+		# Remove / recreate JVM_TMP directory
+		rm -rf "$JVM_TMP"
+		mkdir -p "$JVM_TMP" || {
+			log_failure_msg "could not create JVM temporary directory"
+			exit 1
+		}
+		chown $RUN_USER "$JVM_TMP"
+
+		run_daemon
+		sleep $STARTUP_TIMEOUT
+		if start-stop-daemon --test --start --pidfile "$RUN_PID" \
+			--user $RUN_USER --exec "$JAVA_HOME/bin/java" \
+			>/dev/null; then
+			if [ -f "$RUN_PID" ]; then
+				rm -f "$RUN_PID"
+			fi
+			log_end_msg 1
+		else
+			log_end_msg 0
+		fi
+	else
+		log_progress_msg "(already running)"
+		log_end_msg 0
+	fi
+	;;
+  stop)
+	log_daemon_msg "Stopping $DESC" "$NAME"
+
+	set +e
+	if [ -f "$RUN_PID" ]; then 
+		start-stop-daemon --stop --pidfile "$RUN_PID" \
+			--user "$RUN_USER" \
+			--retry=TERM/$TERM_TIMEOUT/KILL/$KILL_TIMEOUT >/dev/null
+		if [ $? -eq 1 ]; then
+			log_progress_msg "$DESC is not running but pid file exists, cleaning up"
+		elif [ $? -eq 3 ]; then
+			PID="`cat $RUN_PID`"
+			log_failure_msg "Failed to stop $NAME (pid $PID)"
+			exit 1
+		fi
+		rm -f "$RUN_PID"
+		rm -rf "$JVM_TMP"
+	else
+		log_progress_msg "(not running)"
+	fi
+	log_end_msg 0
+	set -e
+	;;
+   status)
+	set +e
+	start-stop-daemon --test --start --pidfile "$RUN_PID" \
+		--user $RUN_USER --exec "$JAVA_HOME/bin/java" \
+		>/dev/null 2>&1
+	if [ "$?" = "0" ]; then
+		if [ -f "$RUN_PID" ]; then
+		    log_success_msg "$DESC is not running, but pid file exists."
+			exit 1
+		else
+		    log_success_msg "$DESC is not running."
+			exit 3
+		fi
+	else
+		log_success_msg "$DESC is running with pid `cat $RUN_PID`"
+	fi
+	set -e
+	;;
+  restart|force-reload)
+	if [ -f "$RUN_PID" ]; then
+		$0 stop
+		sleep 1
+	fi
+	$0 start
+	;;
+  try-restart)
+	if start-stop-daemon --test --start --pidfile "$RUN_PID" \
+		--user $RUN_USER --exec "$JAVA_HOME/bin/java" \
+		>/dev/null; then
+		$0 start
+	fi
+	;;
+  *)
+	log_success_msg "Usage: $0 {start|stop|restart|try-restart|force-reload|status}"
+	exit 1
+	;;
+esac
+
+exit 0
+
